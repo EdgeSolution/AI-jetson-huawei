@@ -1,0 +1,244 @@
+# 本文介绍如何将经过训练的模型部署到 NVIDIA Jetson Orin NX平台中并使用 TensorRT 和 DeepStream SDK 执行推理 ###
+
+【 重要提示：由于官方网站只提供 SBSA ARM CPU的TensorRT的DEB包，此包不适用Jetson平台】
+【所以只能通过官方源下载cuda，tensorRT，cudnn】
+/etc/apt/sources.list.d/nvidia-l4t-apt-source.list
+deb https://repo.download.nvidia.com/jetson/common r35.3 main
+deb https://repo.download.nvidia.com/jetson/t234 r35.3 main
+
+1. # 安装环境 CUAD-11.4, cuDNN-8.6, torch-2.1.0, torchvision-0.16.0 #
+apt install cuda-11-4 
+apt install libfreeimage-dev libcudnn8 libcudnn8-dev libcudnn8-samples
+apt install tensorrt tensorrt-dev tensorrt-libs python3-libnvinfer python3-libnvinfer-dev uff-converter-tf onnx-graphsurgeon graphsurgeon-tf
+apt install deepstream-6.2
+
+2. 安装torch，使用pip3工具下载软件包
+#加-i参数可以指定国内下载源
+apt install python3-pip libopenblas-dev
+python3 -m pip install aiohttp opencv-python scipy=='1.5.3' -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip3 install jetson-stats -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip3 install ./torch-2.1.0a0+41361538.nv23.06-cp38-cp38-linux_aarch64.whl -i https://pypi.tuna.tsinghua.edu.cn/simple
+【通常使用pip3 freeze 或 pip3 list查看系统安装的python包】
+
+3. 安装torchvision【torchvision是一些图像库】
+apt install ffmpeg libavutil-dev libavcodec-dev libavformat-dev libavdevice-dev libavfilter-dev libswscale-dev libswresample-dev libswresample-dev libpostproc-dev libjpeg-dev libpng-dev
+git clone https://github.com/pytorch/vision torchvision //下载源码
+tar -zpxvf vision-0.16.0.tar.gz
+cd vision-0.16.0/ 
+python3 setup.py install  	//从源码编译torchvision
+python3 setup.py bdist_wheel    //利用编译成功的源码生成*.whl文件,生成文件路径在/源码根目录/dist/
+【注意：源码编译安装的torchvision路径是"/usr/lib/python3.8/site-packages/"】
+
+【利用源码编译生成*.whl文件,可直接安装torchvision-0.16.0-cp38-cp38-linux_aarch64.whl文件】
+
+4. 验证torch torchvision是否安装成功
+import torch
+>>> print(torch.__version__)
+>>> print('CUDA available: ' + str(torch.cuda.is_available()))
+>>> print('cuDNN version: ' + str(torch.backends.cudnn.version()))
+>>> a = torch.cuda.FloatTensor(2).zero_()
+>>> print('Tensor a = ' + str(a))
+>>> b = torch.randn(2).cuda()
+>>> print('Tensor b = ' + str(b))
+>>> c = a + b
+>>> print('Tensor c = ' + str(c))
+
+>>> import torchvision
+>>> print(torchvision.__version__)
+
+(可选)5. 安装DeepStream SDK环境
+安装依赖：
+sudo apt install libssl1.1 libgstreamer1.0-0 gstreamer1.0-tools \
+gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
+libgstreamer-plugins-base1.0-dev libgstrtspserver-1.0-0 libjansson4 libyaml-cpp-dev
+
+apt install -y ./deepstream-6.2_6.2.0-1_arm64.deb
+
+
+【跑模型过程通过jtop查看GPU性能】
+6. 下载yolov5网络模型:
+git clone https://github.com/ultralytics/yolov5.git
+安装环境:
+pip3 install gitpython==3.1.30 numpy==1.22.2 setuptools==65.5.1 -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip3 install onnx onnxruntime opencv-python ultralytics -i https://pypi.tuna.tsinghua.edu.cn/simple
+cd yolov5/
+下载模型：
+wget https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5s.pt
+【备注：yolov5s.pt, yolov5m.pt, yolov5l.pt,yolov5x.pt, yolov5n.pt是YOLOV5的不同变体,表示不同大小和复杂性的模型】
+【 yolov5s-seg.pt, yolov5m-seg.pt表示实例分割是指将图片中属于物体类别的像素识别出来并作分类】
+
+python3 detect.py --weights yolov5s.pt   //利用yolov5s.pt模型进行目标检测，
+【运行结果如下, 生成文件在runs/detect】
+YOLOv5 🚀 v7.0-231-gc2f131a Python-3.8.10 torch-2.1.0a0+41361538.nv23.06 CUDA:0 (Orin, 14533MiB)
+Fusing layers...
+YOLOv5s summary: 213 layers, 7225885 parameters, 0 gradients
+image 1/2 /mnt/yolov5/data/images/bus.jpg: 640x480 4 persons, 1 bus, 211.0ms
+image 2/2 /mnt/yolov5/data/images/zidane.jpg: 384x640 2 persons, 2 ties, 218.8ms
+Speed: 3.3ms pre-process, 168.0ms inference, 10.5ms NMS per image at shape (1, 3, 640, 640)
+Results saved to runs/detect/exp
+
+python3 segment/predict.py --weights yolov5s-seg.pt //使用yolov5s-seg.pt模型进行图像分割
+【生成的文件在runs/predict-seg/exp】
+
+apt install imagemagick //linux下图片查看命令
+
+7.自定义训练数据集
+a. 下载数据集图片素材，然后通过labelImg或labelme工具进行不分类标注, 使用标注工具标记图像后，将标签导出为YOLO格式，
+每张*.txt图像一个文件（如果图像中没有对象，则不需要*.txt文件）
+生成images/和labels/:
+  --> imaegs/:里面存放素材图片
+  --> labels/:里面存放标注的*.txt文件，
+  --> 文件*.txt规格,包含class x_center y_center width height(类 标注x坐标 标注y坐标 宽度 高度)
+b. 准备custom.yaml,放置yolov5/data/目录下: yaml里面指定YOLOv5的images,labels目录位置以及有关我们的自定义类的信息
+Example(data/custom.yaml):
+	path: ../datasets/hard-hat
+	train: train/images
+	val: valid/images
+	test: test/images
+
+	nc: 3
+	names: ['head', 'helmet', 'person']
+【备注：另外一种方法直接在Roboflow网站上下载标注好的数据集，里面有已经生成好的images和labels，data.yaml(重命名custom.yaml)】
+
+c. 接下来为自定义对象检测器编写模型配置文件,选择了最小、最快的 YOLOv5 基础模型-yolov5s.pt
+cp yolov5/models/yolov5s.yaml  yolov5/models/custom.yaml  //拷贝标准网络结构，来设置自定义的网络结构
+编辑网络的结构, 修改custom.yaml里面的【nc:】, 和data/custom.yaml的nc一致, 适配自定义数据集
+
+d. 准备好以上文件后就可以开始训练
+python3 train.py --data=data/custom.yaml --img 640 --epochs 300 --cfg=models/custom-yolov5s.yaml --weights weights/yolov5s.pt
+
+--data				设置我们数据集yaml文件的路径
+--img				定义输入图像大小
+--epochs			定义训练时期的数量
+--cfg				指定我们的模型yaml配置路径
+--weights			指定权重的自定义路径
+--name				结果名称
+--nosave			只保存最后的检查点
+--cache ram or disk		缓存图像以加快训练速度,需要大量 RAM/磁盘资源
+
+
+
+
+备注：
+【 由于官方网站只提供 SBSA ARM CPU的TensorRT的DEB包，没有提供jetson平台，因此通过TensorRT官网下载的DEB包不适用Jetson平台】
+【离线安装CUDA，基于此CUDA-11.8版本或更高不能使用TensorRT功能会有报错问题，原因是NV官方不提供JetPack5.1.1的CUDA11.8以上版本构建TensorRT，当前JetPack5.1.1/JetPack5.1.2只支持cuda11.4版本】
+【相关报错Error output:
+【&&&& RUNNING TensorRT.sample_onnx_mnist [TensorRT v8503] # ./sample_onnx_mnist
+[11/02/2023-17:01:07] [I] Building and running a GPU inference engine for Onnx MNIST
+[11/02/2023-17:01:08] [I] [TRT] [MemUsageChange] Init CUDA: CPU +9, GPU +0, now: CPU 20, GPU 4247 (MiB)	[11/02/2023-17:01:27] [I] [TRT] [MemUsageChange] Init builder kernel library: CPU +174, GPU +164, now: CPU 248, GPU 4463 (MiB)
+[11/02/2023-17:01:27] [W] [TRT] onnx2trt_utils.cpp:377: Your ONNX model has been generated with INT64 weights, while TensorRT does not natively support INT64. Attempting to cast down to INT32.
+[11/02/2023-17:01:29] [I] [TRT] [MemUsageChange] Init cuBLAS/cuBLASLt: CPU +556, GPU +525, now: CPU 804, GPU 4989 (MiB)
+[11/02/2023-17:01:29] [I] [TRT] [MemUsageChange] Init cuDNN: CPU +83, GPU +80, now: CPU 887, GPU 5069 (MiB)
+[11/02/2023-17:01:29] [I] [TRT] Local timing cache in use. Profiling results in this builder pass will not be stored.
+[11/02/2023-17:01:29] [W] [TRT] Skipping tactic 0x00000000000003e8 due to exception no kernel image is available for execution on the device
+[11/02/2023-17:01:29] [W] [TRT] Skipping tactic 0x00000000000003ea due to exception Internal cuTensor permutate execute failed
+[11/02/2023-17:01:29] [W] [TRT] Skipping tactic 0x0000000000000000 due to exception no kernel image is available for execution on the device
+】
+
+【以下方法可以跑Yolov5模型，但是在基于onnx模型转换tensorRT模型会失败，原因如上】
+ # 安装环境 CUAD-11.8, cuDNN-8.6, torch-2.1.0, torchvision-0.16.0 #
+1.离线安装：
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/arm64/cuda-ubuntu2004.pin
+sudo mv cuda-ubuntu2004.pin /etc/apt/preferences.d/cuda-repository-pin-600
+wget https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/cuda-tegra-repo-ubuntu2004-11-8-local_11.8.0-1_arm64.deb
+sudo dpkg -i cuda-tegra-repo-ubuntu2004-11-8-local_11.8.0-1_arm64.deb
+sudo cp /var/cuda-tegra-repo-ubuntu2004-11-8-local/cuda-*-keyring.gpg /usr/share/keyrings/
+sudo apt-get update
+sudo apt-get -y install cuda
+
+# 配置环境变量
+export PATH=/usr/local/cuda-11.8/bin${PATH:+:${PATH}}
+export LD_LIBRARY_PATH=/usr/local/cuda/compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
+export LD_LIBRARY_PATH=/usr/local/cuda-11.8/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
+
+
+# 使用cuda-samples-12.3.tar.gz可以测试cuda是否安装成功
+git clone https://github.com/nvidia/cuda-samples
+cd cuda-samples-12.3/Samples/1_Utilities/deviceQuery
+make clean && make
+
+2. 安装cuDNN-8.6
+dpkg -i cudnn-local-repo-ubuntu2004-8.6.0.163_1.0-1_arm64.de
+cp /var/cudnn-local-repo-ubuntu2004-8.6.0.163/cudnn-local-04A93B30-keyring.gpg /usr/share/keyrings/
+apt update && apt install libcudnn8 libcudnn8-dev libcudnn8-samples
+进入/usr/src/cudnn_samples_v8/mnistCUDNN/验证cudNN是否安装成功
+
+3. 安装torch，使用pip3工具下载软件包
+#加-i参数可以指定国内下载源
+apt install python3-pip libopenblas-dev
+pip3 install numpy -i https://pypi.tuna.tsinghua.edu.cn/simple
+python3 -m pip install aiohttp numpy=='1.19.4' scipy=='1.5.3' -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip3 install jetson-stats -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip3 install ./torch-2.1.0a0+41361538.nv23.06-cp38-cp38-linux_aarch64.whl -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip3 install setuptools==49.4.0 -i https://pypi.tuna.tsinghua.edu.cn/simple
+【通常使用pip3 freeze 或 pip3 list查看系统安装的python包】
+
+4. 安装torchvision【torchvision是一些图像库】
+apt install ffmpeg libavutil-dev libavcodec-dev libavformat-dev libavdevice-dev libavfilter-dev libswscale-dev libswresample-dev libswresample-dev libpostproc-dev libjpeg-dev libpng-dev
+git clone https://github.com/pytorch/vision torchvision //下载源码
+tar -zpxvf vision-0.16.0.tar.gz
+cd vision-0.16.0/ 
+python3 setup.py install  	//从源码编译torchvision
+python3 setup.py bdist_wheel    //利用编译成功的源码生成*.whl文件,生成文件路径在/源码根目录/dist/
+【注意：源码编译安装的torchvision路径是"/usr/lib/python3.8/site-packages/"】
+
+【利用源码编译生成*.whl文件,可直接安装torchvision-0.16.0-cp38-cp38-linux_aarch64.whl文件】
+
+5. 验证torch torchvision是否安装成功
+import torch
+>>> print(torch.__version__)
+>>> print('CUDA available: ' + str(torch.cuda.is_available()))
+>>> print('cuDNN version: ' + str(torch.backends.cudnn.version()))
+>>> a = torch.cuda.FloatTensor(2).zero_()
+>>> print('Tensor a = ' + str(a))
+>>> b = torch.randn(2).cuda()
+>>> print('Tensor b = ' + str(b))
+>>> c = a + b
+>>> print('Tensor c = ' + str(c))
+
+>>> import torchvision
+>>> print(torchvision.__version__)
+
+
+6. 安装DeepStream SDK环境
+安装依赖：
+sudo apt install libssl1.1 libgstreamer1.0-0 gstreamer1.0-tools \
+gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
+libgstreamer-plugins-base1.0-dev libgstrtspserver-1.0-0 libjansson4 libyaml-cpp-dev
+
+apt install -y ./deepstream-6.2_6.2.0-1_arm64.deb
+
+
+7. 下载yolov5网络模型:
+git clone https://github.com/ultralytics/yolov5.git
+安装环境:
+pip3 install onnx onnxruntime opencv-python ultralytics -i https://pypi.tuna.tsinghua.edu.cn/simple
+cd yolov5/
+下载模型：
+wget https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5s.pt
+
+转换模型文件
+python3 export_yoloV5.py -w yolov5s.pt --dynamic   //生成 ONNX 模型文件(YOLOv5s示例)
+将生成的ONNX模型文件和labels.txt 文件(如果已生成)复制到该DeepStream-Yolo/
+【备注：yolov5s.pt, yolov5m.pt, yolov5l.pt,yolov5x.pt, yolov5n.pt是YOLOV5的不同变体,表示不同大小和复杂性的模型】
+【 yolov5s-seg.pt, yolov5m-seg.pt表示实例分割是指将图片中属于物体类别的像素识别出来并作分类】
+
+python3 detect.py --weights yolov5s.pt   //利用yolov5s.pt模型进行目标检测，
+【运行结果如下, 生成文件在runs/detect】
+YOLOv5 🚀 v7.0-231-gc2f131a Python-3.8.10 torch-2.1.0a0+41361538.nv23.06 CUDA:0 (Orin, 14533MiB)
+Fusing layers...
+YOLOv5s summary: 213 layers, 7225885 parameters, 0 gradients
+image 1/2 /mnt/yolov5/data/images/bus.jpg: 640x480 4 persons, 1 bus, 211.0ms
+image 2/2 /mnt/yolov5/data/images/zidane.jpg: 384x640 2 persons, 2 ties, 218.8ms
+Speed: 3.3ms pre-process, 168.0ms inference, 10.5ms NMS per image at shape (1, 3, 640, 640)
+Results saved to runs/detect/exp
+
+python3 segment/predict.py --weights yolov5s-seg.pt //使用yolov5s-seg.pt模型进行图像分割
+【生成的文件在runs/predict-seg/exp】
+
+
+参考链接：
+https://github.com/marcoslucianops/DeepStream-Yolo/blob/master/docs/YOLOv5.md#3-download-the-model
+https://forums.developer.nvidia.com/t/pytorch-for-jetson/72048
+https://github.com/pypa/setuptools/issues/3240
+https://blog.51cto.com/u_15953612/6894961
